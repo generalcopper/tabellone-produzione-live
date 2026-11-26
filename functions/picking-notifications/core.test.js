@@ -88,7 +88,7 @@ test('Product aggregation totals pieces and preserves per-order allocations with
   ]);
   assert.equal(details.fba.totalQty, 10);
   assert.equal(details.fba.skuCount, 1);
-  assert.deepEqual(details.fba.products[0].references, [{ label: 'FBAFIRST', qty: 4 }, { label: 'FBASECOND', qty: 6 }]);
+  assert.deepEqual(details.fba.products[0].references, [{ key: 'FBA:one', label: 'FBAFIRST', qty: 4 }, { key: 'FBA:two', label: 'FBASECOND', qty: 6 }]);
   assert.equal(details.fbm.totalQty, 5);
   assert.equal(details.fbm.orderCount, 1);
   assert.ok(c.buildMessage({ details }).text.includes('FBASECOND: 6 pezzi'));

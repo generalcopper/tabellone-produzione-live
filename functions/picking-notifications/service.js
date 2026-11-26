@@ -4,10 +4,14 @@ const { FieldValue, Timestamp } = require('firebase-admin/firestore');
 const c = require('./core');
 const w = require('./write-queue');
 const { renderWriteMessage } = require('./write-mail-template');
+const { renderWhatsAppNotices } = require('./whatsapp-template');
 const CONFIG = 'pickingEmailConfig/system';
 const RECIPIENTS = 'pickingEmailRecipients';
 const EVENTS = 'pickingEmailEvents';
 const DELIVERIES = 'pickingEmailDeliveries';
+const WA_CONFIG = 'pickingWhatsAppConfig/system';
+const WA_RECIPIENTS = 'pickingWhatsAppRecipients';
+const WA_DELIVERIES = 'pickingWhatsAppDeliveries';
 const DIRECTORY_COLLECTIONS = ['powderUsers', 'amzInventoryDirectory', 'payrollDirectory'];
 
 function problem(status, message) {
@@ -57,16 +61,17 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
     return [...users.values()];
   }
 
-  function userRow(user, directory, settings = {}) {
+  function userRow(user, directory, settings = {}, whatsapp = {}) {
     const access = c.accessFor(user, directory);
     const profile = directory.find(row => row.id === user.uid)?.data ||
       directory.find(row => row.id === c.email(user.email))?.data || {};
     const available = access.member && user.emailVerified === true && !!user.metadata?.lastSignInTime;
     return {
       uid: user.uid, name: c.clean(user.displayName || profile.displayName || profile.name || user.email),
-      email: c.email(user.email), available,
+      email: Object.hasOwn(settings, 'email') ? settings.email : c.email(user.email), loginEmail: c.email(user.email),
+      whatsapp: whatsappRow(whatsapp), available,
       reason: !access.member ? 'Utente non abilitato' : user.emailVerified !== true ? 'Email da verificare' :
-        settings.enabled && settings.email !== c.email(user.email) ? 'Email cambiata: disattiva e riattiva le notifiche.' :
+        settings.enabled && c.email(settings.accountEmail || settings.email) !== c.email(user.email) ? 'Email cambiata: disattiva e riattiva le notifiche.' :
         !user.metadata?.lastSignInTime ? 'Primo accesso da completare' : '',
       enabled: settings.enabled === true, revision: settings.revision || 0,
       lastAccessAt: c.millis(user.metadata?.lastSignInTime),
@@ -75,40 +80,99 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
     };
   }
 
+  function whatsappRow(d = {}) {
+    return { phone: d.phone || '', enabled: d.enabled === true, revision: d.revision || 0,
+      lastSentAt: c.millis(d.lastSentAt), lastDeliveredAt: c.millis(d.lastDeliveredAt),
+      lastReadAt: c.millis(d.lastReadAt), lastStatus: d.lastStatus || '', lastChannel: d.lastChannel || '' };
+  }
+  function whatsappSystem(d = {}) {
+    return { enabled: d.enabled === true, state: d.state || 'UNPAIRED',
+      online: clock() - c.millis(d.heartbeatAt) < 420000, lastTestSentAt: c.millis(d.lastTestSentAt) };
+  }
   async function listRecipients() {
-    const [directory, settings, config] = await Promise.all([
+    const [directory, settings, config, waSettings, waConfig] = await Promise.all([
       readDirectory(), db.collection(RECIPIENTS).get(), db.doc(CONFIG).get(),
+      db.collection(WA_RECIPIENTS).get(), db.doc(WA_CONFIG).get(),
     ]);
     const users = await getRegisteredUsers(directory);
     const byUid = new Map(settings.docs.map(s => [s.id, s.data()]));
+    const byWa = new Map(waSettings.docs.map(s => [s.id, s.data()]));
     const rows = users.filter(user => c.validEmail(user.email) &&
-        (c.accessFor(user, directory).member || byUid.get(user.uid)?.enabled))
-      .map(user => userRow(user, directory, byUid.get(user.uid)))
+        (c.accessFor(user, directory).member || byUid.get(user.uid)?.enabled || byWa.get(user.uid)?.enabled))
+      .map(user => userRow(user, directory, byUid.get(user.uid), byWa.get(user.uid)))
       .sort((a, b) => a.name.localeCompare(b.name, 'it', { sensitivity: 'base' }));
-    // Deleted Auth users with an existing subscription can still be deselected.
-    for (const doc of settings.docs) {
-      if (doc.data().enabled && !users.some(user => user.uid === doc.id)) {
-        const data = doc.data();
-        rows.push({ uid: doc.id, name: data.name || data.email || 'Utente non disponibile',
-          email: data.email || '', available: false, reason: 'Account non disponibile',
-          lastAccessAt: 0,
-          enabled: true, revision: data.revision || 0, lastSentAt: c.millis(data.lastSentAt),
-          lastChannel: data.lastSentChannel || '', lastStatus: data.lastStatus || '' });
-      }
+    for (const uid of new Set([...byUid.keys(), ...byWa.keys()])) {
+      const data = byUid.get(uid) || {}, wa = byWa.get(uid) || {};
+      if ((data.enabled || wa.enabled) && !users.some(user => user.uid === uid)) rows.push({
+        uid, name: data.name || data.email || 'Utente non disponibile', email: data.email || '', loginEmail: '',
+        available: false, reason: 'Account non disponibile', lastAccessAt: 0,
+        enabled: data.enabled === true, revision: data.revision || 0, lastSentAt: c.millis(data.lastSentAt),
+        lastChannel: data.lastSentChannel || '', lastStatus: data.lastStatus || '', whatsapp: whatsappRow(wa),
+      });
     }
-    return { users: rows, ready: config.exists && !!config.data().activatedAt };
+    return { users: rows, ready: config.exists && !!config.data().activatedAt, whatsapp: whatsappSystem(waConfig.data()) };
   }
-
   async function status() {
-    const snap = await db.collection(RECIPIENTS).get();
-    return { users: snap.docs.map(doc => {
-      const d = doc.data();
-      return { uid: doc.id, enabled: d.enabled === true, revision: d.revision || 0,
+    const [snap, wa, cfg] = await Promise.all([
+      db.collection(RECIPIENTS).get(), db.collection(WA_RECIPIENTS).get(), db.doc(WA_CONFIG).get(),
+    ]);
+    const mail = new Map(snap.docs.map(d => [d.id, d.data()]));
+    const whatsapp = new Map(wa.docs.map(d => [d.id, d.data()]));
+    return { whatsapp: whatsappSystem(cfg.data()), users: [...new Set([...mail.keys(), ...whatsapp.keys()])].map(uid => {
+      const d = mail.get(uid) || {};
+      return { uid, ...(Object.hasOwn(d, 'email') ? { email: d.email } : {}),
+        enabled: d.enabled === true, revision: d.revision || 0,
         lastSentAt: c.millis(d.lastSentAt), lastChannel: d.lastSentChannel || '',
-        lastStatus: d.lastStatus || '', lastQueuedAt: c.millis(d.lastQueuedAt) };
+        lastStatus: d.lastStatus || '', lastQueuedAt: c.millis(d.lastQueuedAt), whatsapp: whatsappRow(whatsapp.get(uid)) };
     }) };
   }
 
+  async function saveRecipient(actor, input) {
+    const { uid, enabled, whatsappEnabled, revision, whatsappRevision } = input;
+    const email = typeof input.email === 'string' ? c.email(input.email) : '';
+    const phone = input.phone === '' ? '' : c.notificationPhone(input.phone);
+    if (typeof uid !== 'string' || !/^[^/]{1,128}$/.test(uid) || typeof enabled !== 'boolean' ||
+        typeof whatsappEnabled !== 'boolean' || !Number.isInteger(revision) || revision < 0 ||
+        !Number.isInteger(whatsappRevision) || whatsappRevision < 0 || typeof input.email !== 'string' ||
+        input.email.length > 254 || (email && !c.validEmail(email)) || (enabled && !email) ||
+        (input.phone !== '' && !phone) || (whatsappEnabled && !phone)) {
+      throw problem(400, 'Controlla email e numero WhatsApp, completo di prefisso internazionale.');
+    }
+    const directory = await readDirectory();
+    let user = null;
+    try { user = await auth.getUser(uid); } catch (e) { if (e.code !== 'auth/user-not-found') throw e; }
+    if ((enabled || whatsappEnabled) && (!user || !userRow(user, directory).available)) {
+      throw problem(400, 'Questo utente non può ricevere notifiche.');
+    }
+    const mailRef = db.doc(RECIPIENTS + '/' + uid), waRef = db.doc(WA_RECIPIENTS + '/' + uid);
+    await db.runTransaction(async tx => {
+      const [mail, wa, cfg] = await tx.getAll(mailRef, waRef, db.doc(CONFIG));
+      const m = mail.data() || {}, w = wa.data() || {};
+      if (!cfg.data()?.activatedAt) throw problem(503, 'Servizio in attivazione.');
+      if ((m.revision || 0) !== revision || (w.revision || 0) !== whatsappRevision) throw problem(409, 'Dati cambiati. Aggiorna e riprova.');
+      const nextIndex = phone ? db.doc('pickingWhatsAppPhones/' + c.hash(phone)) : null;
+      const oldIndex = w.phone ? db.doc('pickingWhatsAppPhones/' + c.hash(w.phone)) : null;
+      const [next, old] = await Promise.all([nextIndex ? tx.get(nextIndex) : null, oldIndex ? tx.get(oldIndex) : null]);
+      if (whatsappEnabled && next?.exists && next.data().uid !== uid) throw problem(409, 'Numero WhatsApp già associato a un altro dipendente.');
+      const accountEmail = user ? c.email(user.email) : (m.accountEmail || m.email || w.accountEmail || '');
+      const audit = { updatedAt: FieldValue.serverTimestamp(), updatedByUid: actor.uid };
+      const mailChanged = m.enabled !== enabled || m.email !== email || (m.accountEmail || m.email) !== accountEmail;
+      const waChanged = w.enabled !== whatsappEnabled || w.phone !== phone || w.accountEmail !== accountEmail;
+      if (mailChanged) tx.set(mailRef, { ...audit, email, accountEmail, enabled, revision: revision + 1,
+        ...(user ? { name: userRow(user, directory).name } : {}),
+        ...(enabled ? { enabledAt: FieldValue.serverTimestamp() } : {}),
+        ...(m.email !== email ? { lastSentAt: FieldValue.delete(), lastStatus: '', lastSentChannel: '' } : {}),
+      }, { merge: true });
+      if (oldIndex && old?.data()?.uid === uid && (!whatsappEnabled || w.phone !== phone)) tx.delete(oldIndex);
+      if (whatsappEnabled) tx.set(nextIndex, { uid });
+      if (waChanged) tx.set(waRef, { ...audit, phone, accountEmail, enabled: whatsappEnabled, revision: whatsappRevision + 1,
+        ...(whatsappEnabled ? { enabledAt: FieldValue.serverTimestamp() } : {}),
+        ...(w.phone !== phone ? { lastSentAt: FieldValue.delete(), lastReadAt: FieldValue.delete(),
+          lastDeliveredAt: FieldValue.delete(), lastMessageId: FieldValue.delete(), lastStatus: '', lastChannel: '' } : {}),
+      }, { merge: true });
+    });
+    return listRecipients();
+  }
   async function setRecipient(actor, input) {
     const { uid, enabled, revision } = input;
     if (typeof uid !== 'string' || !/^[^/]{1,128}$/.test(uid) ||
@@ -131,10 +195,10 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
       if (!config.exists || !config.data().activatedAt) throw problem(503, 'Servizio in attivazione. Riprova tra poco.');
       const previous = snap.data() || {};
       if ((previous.revision || 0) !== revision) throw problem(409, 'La selezione è cambiata. Aggiorna e riprova.');
-      if (previous.enabled === enabled && (!enabled || previous.email === c.email(user.email))) return;
+      if (previous.enabled === enabled && (!enabled || c.email(previous.accountEmail || previous.email) === c.email(user.email))) return;
       tx.set(ref, {
         enabled, revision: revision + 1, updatedAt: FieldValue.serverTimestamp(), updatedByUid: actor.uid,
-        ...(enabled ? { email: c.email(user.email), name: c.clean(user.displayName || user.email),
+        ...(enabled ? { email: previous.email || c.email(user.email), accountEmail: c.email(user.email), name: c.clean(user.displayName || user.email),
           enabledAt: FieldValue.serverTimestamp() } : {}),
       }, { merge: true });
     });
@@ -147,6 +211,38 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
     if (body.action === 'list') return listRecipients();
     if (body.action === 'status') return status();
     if (body.action === 'setRecipient') return setRecipient(actor, body);
+    if (body.action === 'saveRecipient') return saveRecipient(actor, body);
+    if (body.action === 'previewWriteNotice') {
+      const result = await db.runTransaction(async tx => {
+        const details = await readWriteSummary(tx);
+        if (!details.products.length) throw problem(400, 'Nessun prodotto da produrre.');
+        const sources = [];
+        for (let i = 0; i < details.products.length; i += 100) sources.push(...await tx.getAll(
+          ...details.products.slice(i, i + 100).map(row => db.doc(w.QUEUE + '/' + row.id))));
+        const source = sources.filter(s => s.exists).sort((a, b) => c.millis(b.createTime) - c.millis(a.createTime))[0];
+        if (!source) throw problem(409, 'Coda modificata. Riprova.');
+        const product = details.products.find(row => row.id === source.id);
+        return { sourceId: source.id, sourceIncarnation: w.incarnation(source.createTime),
+          sourceQuantity: w.quantitySignature(source.data()), product,
+          text: c.renderWhatsApp({ type: 'write', channel: 'WRITE', changeKind: 'added', sourceId: source.id, details, generatedAt: clock() }) };
+      }, { readOnly: true });
+      return { ...result, ...(await listRecipients()) };
+    }
+    if (body.action === 'sendWriteNotice') {
+      if (typeof body.requestId !== 'string' || !/^[a-zA-Z0-9_-]{16,100}$/.test(body.requestId) || typeof body.sourceId !== 'string' ||
+          !/^[^/\x00-\x1f]{1,1500}$/.test(body.sourceId) || ['.', '..'].includes(body.sourceId) ||
+          typeof body.sourceIncarnation !== 'string' || body.sourceIncarnation.length > 80 ||
+          typeof body.sourceQuantity !== 'string' || body.sourceQuantity.length > 400) throw problem(400, 'Avviso non valido.');
+      const config = (await db.doc(WA_CONFIG).get()).data();
+      if (!config?.enabled || config.state !== 'READY' || clock() - c.millis(config.heartbeatAt) > 420000) {
+        throw problem(409, 'WhatsApp non disponibile per questo invio.');
+      }
+      const result = await queueNotice({ type: 'write', key: 'MANUAL_WRITE:' + actor.uid + ':' + body.requestId,
+        channel: 'WRITE', label: 'Avviso manuale nuovo prodotto', sourcePath: w.QUEUE + '/' + body.sourceId,
+        sourceId: body.sourceId, sourceIncarnation: body.sourceIncarnation, sourceQuantity: body.sourceQuantity,
+        changeKind: 'added', occurredAt: clock(), actorUid: actor.uid, whatsappOnly: true });
+      return { ...result, ...(await status()) };
+    }
     if (body.action === 'sendSummary') {
       if (typeof body.requestId !== 'string' || !/^[a-zA-Z0-9_-]{16,100}$/.test(body.requestId)) {
         throw problem(400, 'Richiesta di invio non valida.');
@@ -276,20 +372,25 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
   async function queueNotice(notice) {
     const { occurredAt, channel } = notice;
     const eventId = c.hash(notice.key), eventRef = db.doc(EVENTS + '/' + eventId);
-    const selected = await db.collection(RECIPIENTS).where('enabled', '==', true).get();
-    const directory = selected.empty ? [] : await readDirectory();
+    const [selected, selectedWa] = await Promise.all([
+      notice.whatsappOnly ? Promise.resolve({ docs: [] }) : db.collection(RECIPIENTS).where('enabled', '==', true).get(),
+      db.collection(WA_RECIPIENTS).where('enabled', '==', true).get(),
+    ]);
+    const ids = [...new Set([...selected.docs, ...selectedWa.docs].map(d => d.id))];
+    const directory = ids.length ? await readDirectory() : [];
     const authUsers = [];
-    for (let i = 0; i < selected.docs.length; i += 100) {
-      const batch = await auth.getUsers(selected.docs.slice(i, i + 100).map(d => ({ uid: d.id })));
+    for (let i = 0; i < ids.length; i += 100) {
+      const batch = await auth.getUsers(ids.slice(i, i + 100).map(uid => ({ uid })));
       authUsers.push(...batch.users);
     }
     const byUid = new Map(authUsers.map(user => [user.uid, user]));
     const candidates = selected.docs.filter(doc => c.selectedForEvent(doc.data(), byUid.get(doc.id), directory, occurredAt));
+    const waCandidates = selectedWa.docs.filter(doc => c.selectedForWhatsApp(doc.data(), byUid.get(doc.id), directory, occurredAt));
     const now = clock();
     return db.runTransaction(async tx => {
-      const refs = [eventRef, db.doc(CONFIG), ...(notice.sourcePath ? [db.doc(notice.sourcePath)] : []),
-        ...candidates.map(s => s.ref)];
-      const [ledger, config, ...remaining] = await tx.getAll(...refs);
+      const refs = [eventRef, db.doc(CONFIG), db.doc(WA_CONFIG), ...(notice.sourcePath ? [db.doc(notice.sourcePath)] : []),
+        ...candidates.map(s => s.ref), ...waCandidates.map(s => s.ref)];
+      const [ledger, config, waConfig, ...remaining] = await tx.getAll(...refs);
       if (ledger.exists) return { queuedCount: (ledger.data().recipientUids || []).length,
         totals: ledger.data().totals || null, summaryCounts: ledger.data().summaryCounts || null, alreadyQueued: true };
       if (!config.exists || !config.data().activatedAt) throw problem(503, 'Servizio in attivazione.');
@@ -305,59 +406,80 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
         c.summarizeFba(source.data(), notice.sourceId)) : null;
       let active = (!['fba', 'write'].includes(notice.type) || current) &&
         (!isWrite || (w.incarnation(source?.createTime) === notice.sourceIncarnation &&
-          w.quantitySignature(source?.data()) === notice.sourceQuantity)) &&
-        now - occurredAt < 6 * 60 * 60 * 1000;
-      const recipients = remaining;
-      let eligible = active ? recipients.filter((doc, i) => doc.exists &&
+          w.quantitySignature(source?.data()) === notice.sourceQuantity)) && now - occurredAt < 6 * 60 * 60 * 1000;
+      const mailDocs = remaining.slice(0, candidates.length), waDocs = remaining.slice(candidates.length);
+      let eligible = active ? mailDocs.filter((doc, i) => doc.exists &&
         doc.data().revision === candidates[i].data().revision &&
         c.selectedForEvent(doc.data(), byUid.get(doc.id), directory, occurredAt)) : [];
-      if (notice.type === 'manual' && !eligible.length) throw problem(400, 'Seleziona almeno un utente abilitato.');
-      const details = eligible.length ? (isWrite ? await readWriteSummary(tx) : await readPendingSummary(tx, true)) : null;
-      if (isWrite && details && !details.products.some(row => row.id === notice.sourceId)) {
-        active = false;
-        eligible = [];
+      const wc = waConfig.data() || {};
+      if (notice.whatsappOnly && now - c.millis(wc.lastManualWriteAt) < 60000) {
+        throw problem(429, 'Avviso già richiesto. Attendi un minuto.');
       }
+      let waEligible = active && wc.enabled === true && c.millis(wc.activatedAt) > 0 &&
+        occurredAt >= c.millis(wc.activatedAt) && now - occurredAt < 15 * 60000 ? waDocs.filter((doc, i) =>
+          doc.exists && doc.data().revision === waCandidates[i].data().revision &&
+          c.selectedForWhatsApp(doc.data(), byUid.get(doc.id), directory, occurredAt)) : [];
+      if (notice.type === 'manual' && !eligible.length && !waEligible.length) throw problem(400, 'Seleziona almeno un utente abilitato.');
+      const details = eligible.length || waEligible.length ? (isWrite ? await readWriteSummary(tx) : await readPendingSummary(tx, true)) : null;
+      if (isWrite && details && !details.products.some(row => row.id === notice.sourceId)) { active = false; eligible = []; waEligible = []; }
+      if (notice.whatsappOnly && !active) throw problem(409, 'Il prodotto è stato modificato o non è più da produrre.');
+      if (notice.whatsappOnly && !waEligible.length) throw problem(400, 'Nessun destinatario WhatsApp abilitato.');
       const totals = details ? (isWrite ? { write: details.rowCount } :
         { fba: details.fba.orderCount, fbm: details.fbm.orderCount }) : null;
       const summaryCounts = details ? (isWrite ? { writeProducts: details.rowCount, writeQuantities: details.totals } :
         { fbaPieces: details.fba.totalQty, fbaProducts: details.fba.skuCount,
           fbmOrders: details.fbm.orderCount, fbmPieces: details.fbm.totalQty, fbmProducts: details.fbm.skuCount }) : null;
-      const mailRefs = eligible.map(doc => db.doc('email/' + c.PREFIX + c.hash(eventId + ':' + doc.id)));
-      const existing = mailRefs.length ? await tx.getAll(...mailRefs) : [];
-      if (existing.some(doc => doc.exists)) throw problem(500, 'Collisione nella coda email.');
+      const waMessages = details && waEligible.length ? renderWhatsAppNotices({ ...notice, details, generatedAt: now }) : [];
+      if (!waMessages.length) waEligible = [];
+      const deliveryId = uid => c.PREFIX + c.hash(eventId + ':' + uid);
+      const mailRefs = eligible.map(doc => db.doc('email/' + deliveryId(doc.id)));
+      const waJobs = waEligible.flatMap(recipient => waMessages.map((message, i) => ({ recipient, message,
+        ref: db.doc(WA_DELIVERIES + '/' + (i === 0 ? deliveryId(recipient.id) :
+          c.PREFIX + c.hash(eventId + ':' + recipient.id + ':' + message.channel))) })));
+      const waRefs = waJobs.map(job => job.ref);
+      const existing = mailRefs.length + waRefs.length ? await tx.getAll(...mailRefs, ...waRefs) : [];
+      if (existing.some(doc => doc.exists)) throw problem(500, 'Collisione nella coda notifiche.');
+      const metadata = { eventId, channel, label: notice.label, sourcePath: notice.sourcePath || '', sourceId: notice.sourceId || '',
+        noticeType: notice.type, sourceIncarnation: notice.sourceIncarnation || '',
+        sourceQuantity: notice.sourceQuantity || '', changeKind: notice.changeKind || '',
+        occurredAt: Timestamp.fromMillis(occurredAt), createdAt: FieldValue.serverTimestamp() };
+      const messages = new Map();
+      function messageFor(uid) {
+        if (!messages.has(uid)) {
+          const recipientName = userRow(byUid.get(uid), directory).name;
+          messages.set(uid, isWrite ? renderWriteMessage({ ...notice, details, generatedAt: now, recipientName,
+            url: w.URL, timeZone: c.TIME_ZONE }) : c.buildMessage({ ...notice, details, generatedAt: now, recipientName }));
+        }
+        return messages.get(uid);
+      }
       for (let i = 0; i < eligible.length; i++) {
         const recipient = eligible[i], data = recipient.data(), mailRef = mailRefs[i];
-        const recipientName = userRow(byUid.get(recipient.id), directory).name;
-        const message = isWrite ? renderWriteMessage({ ...notice, details, generatedAt: now, recipientName,
-          url: w.URL, timeZone: c.TIME_ZONE }) : c.buildMessage({ ...notice, details, generatedAt: now, recipientName });
-        const mail = {
-          to: data.email, from: isWrite ? w.MAIL_FROM : c.MAIL_FROM, replyTo: 'info@generalcoppersrl.com',
-          message, kind: c.KIND,
+        const mail = { to: data.email, from: isWrite ? w.MAIL_FROM : c.MAIL_FROM, replyTo: 'info@generalcoppersrl.com',
+          message: messageFor(recipient.id), kind: c.KIND,
           picking: { uid: recipient.id, eventId, channel, label: notice.label,
-            sourcePath: notice.sourcePath || '', noticeType: notice.type },
-          createdAt: FieldValue.serverTimestamp(),
-        };
+            sourcePath: notice.sourcePath || '', noticeType: notice.type }, createdAt: FieldValue.serverTimestamp() };
         tx.create(mailRef, mail);
-        tx.create(db.doc(DELIVERIES + '/' + mailRef.id), {
-          uid: recipient.id, email: data.email, recipientRevision: data.revision, eventId,
-          channel, label: notice.label, sourcePath: notice.sourcePath || '', sourceId: notice.sourceId || '',
-          noticeType: notice.type, sourceIncarnation: notice.sourceIncarnation || '',
-          sourceQuantity: notice.sourceQuantity || '', changeKind: notice.changeKind || '',
-          occurredAt: Timestamp.fromMillis(occurredAt), createdAt: FieldValue.serverTimestamp(),
-          envelopeHash: c.envelopeHash(mail), lastStatus: 'PENDING',
-        });
-        if (occurredAt >= c.millis(data.lastQueuedAt)) {
-          tx.set(recipient.ref, { lastQueuedAt: Timestamp.fromMillis(occurredAt),
-            lastMailId: mailRef.id, lastStatus: 'PENDING' }, { merge: true });
-        }
+        tx.create(db.doc(DELIVERIES + '/' + mailRef.id), { ...metadata, uid: recipient.id, email: data.email,
+          recipientRevision: data.revision, envelopeHash: c.envelopeHash(mail), lastStatus: 'PENDING', whatsappProducer: 2 });
+        if (occurredAt >= c.millis(data.lastQueuedAt)) tx.set(recipient.ref, {
+          lastQueuedAt: Timestamp.fromMillis(occurredAt), lastMailId: mailRef.id, lastStatus: 'PENDING',
+        }, { merge: true });
       }
+      for (const { recipient, message, ref } of waJobs) {
+        const data = recipient.data();
+        tx.create(ref, { ...metadata, channel: message.channel, producer: 2, uid: recipient.id, phone: data.phone,
+          revision: data.revision, kind: 'notice', status: 'PENDING',
+          text: message.text, expiresAt: Timestamp.fromMillis(occurredAt + 15 * 60000) });
+      }
+      const recipients = [...new Set([...eligible, ...waEligible].map(doc => doc.id))];
       tx.create(eventRef, { key: notice.key, channel, sourcePath: notice.sourcePath || '',
         noticeType: notice.type, totals, summaryCounts, ...(notice.actorUid ? { actorUid: notice.actorUid } : {}),
         occurredAt: Timestamp.fromMillis(occurredAt), processedAt: FieldValue.serverTimestamp(),
-        recipientUids: eligible.map(doc => doc.id), outcome: !active ? 'no_longer_pending' :
-          eligible.length ? 'queued' : 'no_selected_recipients' });
+        recipientUids: recipients, emailRecipientUids: eligible.map(d => d.id), whatsappRecipientUids: waEligible.map(d => d.id),
+        outcome: !active ? 'no_longer_pending' : recipients.length ? 'queued' : 'no_selected_recipients' });
       if (notice.type === 'manual') tx.update(db.doc(CONFIG), { lastManualAt: FieldValue.serverTimestamp() });
-      return { queuedCount: eligible.length, totals, summaryCounts, alreadyQueued: false };
+      if (notice.whatsappOnly) tx.update(db.doc(WA_CONFIG), { lastManualWriteAt: FieldValue.serverTimestamp() });
+      return { queuedCount: recipients.length, totals, summaryCounts, alreadyQueued: false };
     });
   }
 
@@ -384,7 +506,7 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
       tx.set(ref, { lastStatus: outcome, attempts: attempt, updatedAt: FieldValue.serverTimestamp(),
         ...(outcome === 'SUCCESS' && completion ? { sentAt: Timestamp.fromMillis(completion) } : {}),
       }, { merge: true });
-      if (recipient.exists) {
+      if (recipient.exists && c.email(recipient.data().email) === c.email(data.email)) {
         const previous = recipient.data();
         const patch = {};
         if (previous.lastMailId === mailId) patch.lastStatus = outcome;

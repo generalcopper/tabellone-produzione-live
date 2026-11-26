@@ -8102,7 +8102,7 @@ async function openPickingMail() {
   if (!state.user?.isAdmin || pickingHomeView() !== "notifications") return;
   try {
     if (!_pickingMailLoading)
-      _pickingMailLoading = import("./picking-notifications.js?v=c131b87dce47");
+      _pickingMailLoading = import("./picking-notifications.js?v=fdd3d219bc43");
     const mod = await _pickingMailLoading;
     if (!state.user?.isAdmin || pickingHomeView() !== "notifications") return;
     if (!_pickingMailUi)
@@ -14762,7 +14762,7 @@ const PICKING_VIEW_TITLES = {
   pickingFba: "Picking",
   pickingHistory: "Storico prelievi",
   bioneeShop: "Bionee shop",
-  notifications: "Notifiche email",
+  notifications: "Notifiche",
 };
 
 // ===== Da ubicare =====

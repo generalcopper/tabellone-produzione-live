@@ -2,6 +2,7 @@
 
 const { createHash } = require('node:crypto');
 const { renderMessage } = require('./mail-template');
+const { renderWhatsApp, legacyWhatsApp } = require('./whatsapp-template');
 const PROJECT = 'tabellone-produzione-liv-e313e';
 const REGION = 'europe-west1';
 const URL = 'https://' + PROJECT + '.web.app/picking.html';
@@ -139,7 +140,25 @@ function newWork(before, after, id, channel, occurredAt, activatedAt, sourceCrea
 function selectedForEvent(recipient, user, directory, occurredAt) {
   return recipient?.enabled === true && millis(recipient.enabledAt) <= occurredAt &&
     millis(recipient.enabledAt) > 0 && accessFor(user, directory).member &&
-    user.emailVerified === true && email(user.email) === recipient.email;
+    user.emailVerified === true && validEmail(recipient.email) &&
+    email(user.email) === email(recipient.accountEmail || recipient.email);
+}
+
+function notificationPhone(value) {
+  if (typeof value !== 'string' || value.length > 40) return '';
+  let p = value.trim().replace(/[ ().-]/g, '');
+  if (p.startsWith('00')) p = '+' + p.slice(2);
+  if (/^3\d{8,9}$/.test(p)) p = '+39' + p;
+  return /^\+[1-9]\d{7,14}$/.test(p) ? p : '';
+}
+function selectedForWhatsApp(recipient, user, directory, occurredAt) {
+  return recipient?.enabled === true && notificationPhone(recipient.phone) === recipient.phone &&
+    !!recipient.phone && millis(recipient.enabledAt) > 0 && millis(recipient.enabledAt) <= occurredAt &&
+    accessFor(user, directory).member && user.emailVerified === true && !!user.metadata?.lastSignInTime &&
+    email(user.email) === email(recipient.accountEmail);
+}
+function whatsAppText(message, channel) {
+  return legacyWhatsApp(message, channel);
 }
 
 function pendingTotals(fbaDocs, fbmDocs) {
@@ -162,7 +181,7 @@ function pendingDetails(fbaDocs, fbmDocs) {
       const product = products.get(sku) || { sku, title: '', qty: 0, references: new Map() };
       if (!product.title && line.title) product.title = line.title;
       product.qty += line.qty;
-      const reference = product.references.get(work.key) || { label: work.label, qty: 0 };
+      const reference = product.references.get(work.key) || { key: work.key, label: work.label, qty: 0 };
       reference.qty += line.qty;
       product.references.set(work.key, reference);
       products.set(sku, product);
@@ -229,5 +248,5 @@ function retryDelay(delivery) {
 }
 
 module.exports = { PROJECT, REGION, URL, PREFIX, KIND, TIME_ZONE, MAIL_FROM, clean, skuKey, productTitle, email, hash, validEmail, millis, number,
-  isEnabled, accessFor, summarizeFba, summarizeFbm, newWork, selectedForEvent, buildMessage,
+  notificationPhone, selectedForWhatsApp, whatsAppText, renderWhatsApp, isEnabled, accessFor, summarizeFba, summarizeFbm, newWork, selectedForEvent, buildMessage,
   pendingTotals, pendingDetails, dailySlot, envelopeHash, deliveryOutcome, retryDelay };

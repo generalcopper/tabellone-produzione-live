@@ -78,6 +78,92 @@ if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8791') {
     return event;
   }
 
+  async function configure(patch = {}) {
+    return service.api('Bearer admin-token', { action: 'saveRecipient', uid: 'worker', enabled: false,
+      whatsappEnabled: true, email: 'notices@example.com', phone: '333 1234567', revision: 0, whatsappRevision: 0, ...patch });
+  }
+  test('contacts save atomically, normalize phone, preserve login and survive list reload', async () => {
+    await configure();
+    const row = (await service.api('Bearer admin-token', { action: 'list' })).users.find(x => x.uid === 'worker');
+    assert.equal(row.email, 'notices@example.com'); assert.equal(row.loginEmail, worker.email);
+    assert.equal(row.whatsapp.phone, '+393331234567'); assert.equal(row.whatsapp.enabled, true);
+    assert.equal(row.enabled, false); assert.equal(users.get('worker').email, worker.email);
+    await assert.rejects(configure({ email: 'other@example.com' }), e => e.status === 409);
+    assert.equal((await db.doc(RECIPIENTS + '/worker').get()).data().email, 'notices@example.com');
+  });
+  test('duplicate enabled phone and invalid email reject the entire contact save', async () => {
+    await configure();
+    await assert.rejects(configure({ uid: 'admin', email: 'admin@example.com' }), e => e.status === 409);
+    assert.equal((await db.doc(RECIPIENTS + '/admin').get()).exists, false);
+    await assert.rejects(configure({ email: 'bad@', revision: 1, whatsappRevision: 1 }), e => e.status === 400);
+    assert.equal((await db.doc('pickingWhatsAppRecipients/worker').get()).data().revision, 1);
+  });
+  test('a late delivery to a replaced email cannot mark the new contact as sent', async () => {
+    await configure({ enabled: true });
+    await service.onNewWork(await createWork(), 'FBA');
+    const mail = await firstMail();
+    await configure({ enabled: true, email: 'replacement@example.com', revision: 1, whatsappRevision: 1 });
+    await deliver(mail.ref, { state: 'SUCCESS', attempts: 1, endTime: Timestamp.now(), info: { accepted: ['notices@example.com'] } });
+    const recipient = (await db.doc(RECIPIENTS + '/worker').get()).data();
+    assert.equal(recipient.email, 'replacement@example.com');
+    assert.equal(recipient.lastSentAt, undefined); assert.equal(recipient.lastStatus, '');
+    assert.equal((await db.doc(DELIVERIES + '/' + mail.id).get()).data().lastStatus, 'SUCCESS');
+  });
+  test('WhatsApp-only FBA notification creates no email and concurrent events stay deduplicated', async () => {
+    await configure();
+    await db.doc('pickingWhatsAppConfig/system').set({ enabled: true, activatedAt: Timestamp.fromMillis(activatedAt) });
+    const event = await createWork();
+    await Promise.all([service.onNewWork(event, 'FBA'), service.onNewWork(event, 'FBA')]);
+    assert.equal((await db.collection('email').get()).size, 0);
+    const jobs = await db.collection('pickingWhatsAppDeliveries').get(); assert.equal(jobs.size, 1);
+    assert.equal(jobs.docs[0].data().producer, 2); assert.match(jobs.docs[0].data().text, /FBA/);
+  });
+  test('both channels use saved contacts and a later Auth email change blocks both', async () => {
+    await configure({ enabled: true });
+    await db.doc('pickingWhatsAppConfig/system').set({ enabled: true, activatedAt: Timestamp.fromMillis(activatedAt) });
+    await service.onNewWork(await createWork('first'), 'FBA');
+    assert.equal((await firstMail()).data().to, 'notices@example.com');
+    assert.equal((await db.collection('pickingWhatsAppDeliveries').get()).size, 1);
+    users.get('worker').email = 'changed@example.com';
+    await service.onNewWork(await createWork('later'), 'FBA');
+    assert.equal((await db.collection('email').get()).size, 1);
+    assert.equal((await db.collection('pickingWhatsAppDeliveries').get()).size, 1);
+  });
+  test('manual summary queues separate FBA and FBM WhatsApps once, while email stays a single summary', async () => {
+    await configure({ enabled: true });
+    await db.doc('pickingWhatsAppConfig/system').set({ enabled: true, activatedAt: Timestamp.fromMillis(activatedAt) });
+    await createWork('fba'); await createWork('fbm', 'FBM');
+    const body = { action: 'sendSummary', requestId: 'separated_summary_20261124' };
+    await Promise.all([service.api('Bearer admin-token', body), service.api('Bearer admin-token', body)]);
+    const jobs = (await db.collection('pickingWhatsAppDeliveries').get()).docs;
+    assert.equal(jobs.length, 2);
+    assert.deepEqual(jobs.map(j => j.data().channel).sort(), ['FBA', 'FBM']);
+    assert.doesNotMatch(jobs.find(j => j.data().channel === 'FBA').data().text, /FBM|#fbm/);
+    assert.doesNotMatch(jobs.find(j => j.data().channel === 'FBM').data().text, /FBA/);
+    assert.ok(jobs.every(j => j.data().uid === 'worker'));
+    assert.equal((await db.collection('email').get()).size, 1);
+    assert.equal((await db.collection(DELIVERIES).get()).docs[0].data().whatsappProducer, 2);
+  });
+  test('empty work queues produce no WhatsApp filler even when the email summary is requested', async () => {
+    await configure({ enabled: true });
+    await db.doc('pickingWhatsAppConfig/system').set({ enabled: true, activatedAt: Timestamp.fromMillis(activatedAt) });
+    await service.api('Bearer admin-token', { action: 'sendSummary', requestId: 'empty_summary_20261124' });
+    assert.equal((await db.collection('pickingWhatsAppDeliveries').get()).size, 0);
+    assert.equal((await db.collection('email').get()).size, 1);
+    assert.equal((await db.collection(DELIVERIES).get()).docs[0].data().whatsappProducer, 2);
+  });
+  test('WhatsApp global pause and activation cutoff leave email sending intact', async () => {
+    await configure({ enabled: true });
+    await db.doc('pickingWhatsAppConfig/system').set({ enabled: false, activatedAt: Timestamp.fromMillis(activatedAt) });
+    await service.onNewWork(await createWork('paused'), 'FBA');
+    assert.equal((await db.collection('email').get()).size, 1);
+    assert.equal((await db.collection('pickingWhatsAppDeliveries').get()).size, 0);
+    const event = await createWork('older');
+    await db.doc('pickingWhatsAppConfig/system').update({ enabled: true, activatedAt: Timestamp.fromMillis(Date.now() + 1000) });
+    await service.onNewWork(event, 'FBA');
+    assert.equal((await db.collection('pickingWhatsAppDeliveries').get()).size, 0);
+  });
+
   test('API blocks absent/invalid credentials and operators, regardless of supplied admin UID', async () => {
     for (const bearer of ['', 'Bearer invalid']) {
       await assert.rejects(service.api(bearer, { action: 'list' }), error => error.status === 401);
@@ -319,6 +405,68 @@ if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8791') {
     await db.doc(CONFIG).update({ writeActivatedAt: Timestamp.fromMillis(activatedAt) });
     await select();
   }
+
+  async function prepareManualWrite() {
+    await configure({ enabled: true });
+    await db.doc(CONFIG).update({ writeActivatedAt: Timestamp.fromMillis(activatedAt) });
+    await db.doc('pickingWhatsAppConfig/system').set({ enabled: true, state: 'READY',
+      heartbeatAt: Timestamp.now(), activatedAt: Timestamp.fromMillis(activatedAt) });
+    await createWrite('older', { queueOrderKey: 'Z' });
+    await createWrite('latest', { queueOrderKey: 'A', qty: 30, unit: 'pz' });
+    const preview = await service.api('Bearer admin-token', { action: 'previewWriteNotice' });
+    return { action: 'sendWriteNotice', requestId: 'one_time_write_20261124',
+      sourceId: preview.sourceId, sourceIncarnation: preview.sourceIncarnation, sourceQuantity: preview.sourceQuantity };
+  }
+
+  test('manual WhatsApp preview selects latest pending product, preserves queue order and marks NUOVO', async () => {
+    await prepareManualWrite();
+    const before = await db.collection('producedDays/linea_liquidi/queue').get();
+    const preview = await service.api('Bearer admin-token', { action: 'previewWriteNotice' });
+    assert.equal(preview.sourceId, 'latest');
+    assert.match(preview.text, /1\. \*Prodotto latest\* — \*30 pz\* · \*NUOVO\*/);
+    assert.doesNotMatch(preview.text, /https?:|www\.|Apri app/i);
+    const after = await db.collection('producedDays/linea_liquidi/queue').get();
+    assert.deepEqual(after.docs.map(d => d.updateTime), before.docs.map(d => d.updateTime));
+    assert.equal((await db.collection('pickingWhatsAppDeliveries').get()).size, 0);
+  });
+
+  test('one-off Write sends only opted-in WhatsApp, never email, and deduplicates concurrent retries', async () => {
+    const body = await prepareManualWrite();
+    const before = await db.collection('producedDays/linea_liquidi/queue').get();
+    const result = await Promise.all([service.api('Bearer admin-token', body), service.api('Bearer admin-token', body)]);
+    assert.deepEqual(result.map(r => r.alreadyQueued).sort(), [false, true]);
+    assert.ok(result.every(r => r.queuedCount === 1));
+    const jobs = await db.collection('pickingWhatsAppDeliveries').get();
+    assert.equal(jobs.size, 1); assert.equal(jobs.docs[0].data().uid, 'worker');
+    assert.equal(jobs.docs[0].data().sourceId, 'latest');
+    assert.match(jobs.docs[0].data().text, /Prodotto latest\* — \*30 pz\* · \*NUOVO\*/);
+    assert.equal((await db.collection('email').get()).size, 0);
+    assert.equal((await db.collection(DELIVERIES).get()).size, 0);
+    const after = await db.collection('producedDays/linea_liquidi/queue').get();
+    assert.deepEqual(after.docs.map(d => d.updateTime), before.docs.map(d => d.updateTime));
+    await assert.rejects(service.api('Bearer admin-token', { ...body, requestId: 'different_request_1234' }), e => e.status === 429);
+    assert.equal((await db.collection('pickingWhatsAppDeliveries').get()).size, 1);
+  });
+
+  test('one-off Write rejects changed source, unavailable service and non-admin without any sends', async () => {
+    const body = await prepareManualWrite();
+    await assert.rejects(service.api('Bearer worker-token', body), e => e.status === 403);
+    await db.doc('producedDays/linea_liquidi/queue/latest').update({ qty: 31 });
+    await assert.rejects(service.api('Bearer admin-token', body), e => e.status === 409);
+    await db.doc('pickingWhatsAppConfig/system').update({ enabled: false });
+    await assert.rejects(service.api('Bearer admin-token', body), e => e.status === 409);
+    assert.equal((await db.collection('email').get()).size, 0);
+    assert.equal((await db.collection('pickingWhatsAppDeliveries').get()).size, 0);
+    assert.equal((await db.collection(EVENTS).get()).size, 0);
+  });
+
+  test('one-off Write rejects empty WhatsApp selection even if email is enabled', async () => {
+    const body = await prepareManualWrite();
+    await db.doc('pickingWhatsAppRecipients/worker').update({ enabled: false });
+    await assert.rejects(service.api('Bearer admin-token', body), e => e.status === 400);
+    assert.equal((await db.collection('email').get()).size, 0);
+    assert.equal((await db.collection('pickingWhatsAppDeliveries').get()).size, 0);
+  });
 
   test('Write queues immediately for opted-in users, lists production order and deduplicates concurrent delivery', async () => {
     await activateWrite();
