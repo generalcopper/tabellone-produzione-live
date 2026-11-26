@@ -1,3 +1,4 @@
+import {restoreServiceMonitorBundle} from './warehouse-service-monitors-compat.mjs';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
@@ -5,7 +6,8 @@ import {monitoredServices} from '../public/minimal-originale/warehouse-assets/wa
 import {serviceDisplayState} from '../public/minimal-originale/warehouse-assets/warehouse-operational-policy.js';
 import {restoreOperationalPolicy,OPERATIONAL_BASELINE} from './warehouse-operational-compat.mjs';
 import {createHash} from 'node:crypto';
-const bundle=await readFile('public/minimal-originale/warehouse-assets/warehouse-DAXf6-td.js','utf8');
+const shipped=await readFile('public/minimal-originale/warehouse-assets/warehouse-DAXf6-td.js','utf8');
+const bundle=restoreServiceMonitorBundle(shipped);
 const restored=restoreOperationalPolicy(bundle);
 assert.equal(createHash('sha256').update(restored).digest('hex'),OPERATIONAL_BASELINE);
 assert.throws(()=>restoreOperationalPolicy(bundle.replace('Sicurezza aziendale','Altered')));
@@ -99,7 +101,7 @@ console.log(JSON.stringify({operationalPolicy:'passed',cases,weekendTimeZone:'Eu
  securityAndBrt:'retained',sourceProofs:'same original objects',layout:'complete prior bundle restored exactly'}));
 
 const sw=await readFile('public/minimal-originale/warehouse-sw.js','utf8');
-const bundleHash=createHash('sha256').update(bundle).digest('hex');
+const bundleHash=createHash('sha256').update(shipped).digest('hex');
 assert.ok(sw.includes('lg-warehouse-static-'+bundleHash.slice(0,20)));
 assert.ok(sw.includes('warehouse-DAXf6-td.js?v='+bundleHash));
 assert.ok(sw.includes('warehouse-operational-policy.js?v='+createHash('sha256').update(await readFile('public/minimal-originale/warehouse-assets/warehouse-operational-policy.js')).digest('hex')));
