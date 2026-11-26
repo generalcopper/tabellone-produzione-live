@@ -1,3 +1,4 @@
+import {restoreServiceMonitorBundle} from './warehouse-service-monitors-compat.mjs';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
@@ -58,6 +59,7 @@ export const operationalPatches=[
   ]
 ];
 export function restoreOperationalPolicy(bundle) {
+  bundle=restoreServiceMonitorBundle(bundle);
   const head="import {serviceDisplayState as __serviceDisplayState} from \"./warehouse-operational-policy.js?v=e0f6d7157e274263e7b822b27ac653e6dee4c2946c51d6588663e713c9b44766\";\n";
   if(!bundle.startsWith(head)){assert.ok(!bundle.includes('__serviceDisplayState'),'Operational policy import missing or altered');return bundle;}
   assert.equal(sha(readFileSync(new URL('../public/minimal-originale/warehouse-assets/warehouse-operational-policy.js',import.meta.url))),'e0f6d7157e274263e7b822b27ac653e6dee4c2946c51d6588663e713c9b44766','Reviewed weekend policy changed');

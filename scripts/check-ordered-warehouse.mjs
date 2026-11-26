@@ -98,3 +98,5 @@ await import('./test-warehouse-alarm.mjs');
 await import('./test-warehouse-alarm-experience.mjs');
 
 await import('./test-warehouse-operational-policy.mjs');
+
+await import('./test-warehouse-service-monitors.mjs');
